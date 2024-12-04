@@ -1,290 +1,214 @@
-#%% IMPORTS
-import os
 import pandas as pd
-import torch
-import torch.nn as nn
-import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader
-from sklearn.preprocessing import StandardScaler, OneHotEncoder
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import roc_auc_score, log_loss, classification_report, roc_curve
-from zipfile import ZipFile
-import matplotlib.pyplot as plt
-import numpy as np
 
-#%% CONFIGURATION
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-BATCH_SIZE = 64
-EPOCHS = 20
-LEARNING_RATE = 1e-3
-RANDOM_STATE = 42
-SEED = 42
+X0 = pd.read_parquet("./data/X_t0.parquet")
+y0 = pd.read_parquet("./data/y_t0.parquet")
+X1 = pd.read_parquet("./data/X_t1.parquet")
+y1 = pd.read_parquet("./data/y_t1.parquet")
+X = pd.concat([X0, X1], axis=0)
+y = pd.concat([y0, y1], axis=0)
 
-#%% SET RANDOM SEED
-def set_seed(seed=SEED):
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    np.random.seed(seed)
+X_for_predictions = pd.read_parquet("./data/X_t2.parquet") # for predictions
 
-#%% DATA LOADING
-def load_data():
-    X0 = pd.read_parquet("./data/X_t0.parquet")
-    y0 = pd.read_parquet("./data/y_t0.parquet")
-    X1 = pd.read_parquet("./data/X_t1.parquet")
-    y1 = pd.read_parquet("./data/y_t1.parquet")
-    X = pd.concat([X0, X1], axis=0).reset_index(drop=True)
-    y = pd.concat([y0, y1], axis=0).reset_index(drop=True)
-    X_for_predictions = pd.read_parquet("./data/X_t2.parquet")
-    return X, y, X_for_predictions
+
+#%% DATA TYPES
+data_types = {
+    'borrow_block_number': 'numerical',  # Block number where the loan occurred
+    'borrow_timestamp': 'datetime',  # Timestamp indicating when the loan occurred
+    'wallet_address': 'categorical',  # Address of the wallet associated with the transactions
+    'first_tx_timestamp': 'datetime',  # Date and time of the wallet's first transaction
+    'last_tx_timestamp': 'datetime',  # Date and time of the wallet's last transaction
+    'wallet_age': 'numerical',  # Age of the wallet in days
+    'incoming_tx_count': 'numerical',  # Total number of incoming transactions
+    'outgoing_tx_count': 'numerical',  # Total number of outgoing transactions
+    'net_incoming_tx_count': 'numerical',  # Net difference between incoming and outgoing transactions
+    'total_gas_paid_eth': 'numerical',  # Total gas fees paid in Ethereum (ETH)
+    'avg_gas_paid_per_tx_eth': 'numerical',  # Average gas fee paid per transaction in ETH
+    'risky_tx_count': 'numerical',  # Number of transactions classified as risky
+    'risky_unique_contract_count': 'numerical',  # Number of unique contracts involved in risky transactions
+    'risky_first_tx_timestamp': 'datetime',  # Timestamp of the first risky transaction
+    'risky_last_tx_timestamp': 'datetime',  # Timestamp of the last risky transaction
+    'risky_first_last_tx_timestamp_diff': 'numerical',  # Time difference between the first and last risky transactions
+    'risky_sum_outgoing_amount_eth': 'numerical',  # Total outgoing ETH in risky transactions
+    'outgoing_tx_sum_eth': 'numerical',  # Total outgoing ETH in all transactions
+    'incoming_tx_sum_eth': 'numerical',  # Total incoming ETH in all transactions
+    'outgoing_tx_avg_eth': 'numerical',  # Average outgoing ETH per transaction
+    'incoming_tx_avg_eth': 'numerical',  # Average incoming ETH per transaction
+    'max_eth_ever': 'numerical',  # Maximum ETH balance ever recorded in the wallet
+    'min_eth_ever': 'numerical',  # Minimum ETH balance ever recorded in the wallet
+    'total_balance_eth': 'numerical',  # Current total balance of the wallet in ETH
+    'risk_factor': 'numerical',  # Calculated risk factor for the wallet
+    'total_collateral_eth': 'numerical',  # Total collateral in ETH associated with the wallet
+    'total_collateral_avg_eth': 'numerical',  # Average collateral in ETH
+    'total_available_borrows_eth': 'numerical',  # Total ETH available for borrowing
+    'total_available_borrows_avg_eth': 'numerical',  # Average ETH available for borrowing
+    'avg_weighted_risk_factor': 'numerical',  # Weighted average of the risk factor
+    'risk_factor_above_threshold_daily_count': 'numerical',  # Number of days the risk factor exceeded a threshold
+    'avg_risk_factor': 'numerical',  # General average of the risk factor
+    'max_risk_factor': 'numerical',  # Maximum risk factor value recorded
+    'borrow_amount_sum_eth': 'numerical',  # Total amount borrowed in ETH
+    'borrow_amount_avg_eth': 'numerical',  # Average amount borrowed in ETH
+    'borrow_count': 'numerical',  # Total number of borrowing transactions
+    'repay_amount_sum_eth': 'numerical',  # Total amount repaid in ETH
+    'repay_amount_avg_eth': 'numerical',  # Average amount repaid in ETH
+    'repay_count': 'numerical',  # Total number of repayment transactions
+    'borrow_repay_diff_eth': 'numerical',  # Difference between the amount borrowed and repaid in ETH
+    'deposit_count': 'numerical',  # Total number of deposits made
+    'deposit_amount_sum_eth': 'numerical',  # Total deposit amount in ETH
+    'time_since_first_deposit': 'numerical',  # Time elapsed since the first deposit
+    'withdraw_amount_sum_eth': 'numerical',  # Total amount withdrawn in ETH
+    'withdraw_deposit_diff_if_positive_eth': 'numerical',  # Positive difference between withdrawals and deposits in ETH
+    'liquidation_count': 'numerical',  # Total number of liquidations recorded
+    'time_since_last_liquidated': 'numerical',  # Time elapsed since the last liquidation
+    'liquidation_amount_sum_eth': 'numerical',  # Total amount liquidated in ETH
+    'market_adx': 'numerical',  # Average Directional Index of the market
+    'market_adxr': 'numerical',  # Smoothed Average Directional Index of the market
+    'market_apo': 'numerical',  # Absolute Price Oscillator of the market
+    'market_aroonosc': 'numerical',  # Aroon Oscillator for the market
+    'market_aroonup': 'numerical',  # Aroon-Up value of the market
+    'market_atr': 'numerical',  # Average True Range of the market
+    'market_cci': 'numerical',  # Commodity Channel Index of the market
+    'market_cmo': 'numerical',  # Chande Momentum Oscillator of the market
+    'market_correl': 'numerical',  # Market correlation
+    'market_dx': 'numerical',  # Directional Index of the market
+    'market_fastk': 'numerical',  # Fast %K stochastic component of the market
+    'market_fastd': 'numerical',  # Fast %D stochastic component of the market
+    'market_ht_trendmode': 'categorical',  # Hilbert trend mode of the market
+    'market_linearreg_slope': 'numerical',  # Linear regression slope of the market
+    'market_macd_macdext': 'numerical',  # Extended MACD line of the market
+    'market_macd_macdfix': 'numerical',  # Fixed MACD line of the market
+    'market_macd': 'numerical',  # MACD line of the market
+    'market_macdsignal_macdext': 'numerical',  # Extended MACD signal line of the market
+    'market_macdsignal_macdfix': 'numerical',  # Fixed MACD signal line of the market
+    'market_macdsignal': 'numerical',  # MACD signal line of the market
+    'market_max_drawdown_365d': 'numerical',  # Maximum drawdown over 365 days in the market
+    'market_natr': 'numerical',  # Normalized Average True Range of the market
+    'market_plus_di': 'numerical',  # Positive Directional Indicator of the market
+    'market_plus_dm': 'numerical',  # Positive Directional Movement of the market
+    'market_ppo': 'numerical',  # Percentage Price Oscillator of the market
+    'market_rocp': 'numerical',  # Rate of Change Percentage of the market price
+    'market_rocr': 'numerical',  # Rate of Change Ratio of the market price
+    'unique_borrow_protocol_count': 'numerical',  # Number of unique borrowing protocols used
+    'unique_lending_protocol_count': 'numerical',  # Number of unique lending protocols active
+    # 'target': 'categorical'  # Target variable indicating client delinquency status
+}
+
+# Define lists for different data types
+numerical_features = [col for col, dtype in data_types.items() if dtype == 'numerical']
+categorical_features = [col for col, dtype in data_types.items() if dtype == 'categorical']
+datetime_features = [col for col, dtype in data_types.items() if dtype == 'datetime']
+other_features = [col for col, dtype in data_types.items() if dtype not in ['numerical', 'categorical', 'datetime']]
+
+# print(f"Numerical Features ({len(numerical_features)}): {numerical_features}")
+# print(f"Categorical Features ({len(categorical_features)}): {categorical_features}")
+# print(f"Datetime Features ({len(datetime_features)}): {datetime_features}")
+# print(f"Other Features ({len(other_features)}): {other_features}")
 
 #%% DATA PREPROCESSING
-def preprocess_data(X, X_for_predictions):
-    # Drop the 'wallet_address' as it's a unique identifier with no predictive value
-    X = X.drop(columns=['wallet_address'])
-    X_for_predictions = X_for_predictions.drop(columns=['wallet_address'])
+import numpy as np
 
-    # Identify numerical and categorical features based on variable descriptions
-    datetime_features = [
-        'borrow_timestamp', 
-        'first_tx_timestamp', 
-        'last_tx_timestamp', 
-        'risky_first_tx_timestamp', 
-        'risky_last_tx_timestamp'
-    ]
-    X = X.drop(columns=datetime_features)
-    X_for_predictions = X_for_predictions.drop(columns=datetime_features)
+# It seems that 999... is a placeholder
+X['time_since_last_liquidated'] = X['time_since_last_liquidated'].replace(999999999.0, np.nan)
+# It seems that 100... is a placeholder
+X['max_risk_factor'] = X.max_risk_factor.replace(1000000, np.nan)
 
-    numerical_features = X.select_dtypes(include=['int64', 'float64']).columns.tolist()
-    categorical_features = X.select_dtypes(include=['object', 'category']).columns.tolist()
+#%% EXPLORATORY DATA ANALYSIS
 
-    print(f"Numerical Features ({len(numerical_features)}): {numerical_features}")
-    print(f"Categorical Features ({len(categorical_features)}): {categorical_features}")
+import matplotlib.pyplot as plt
+from tqdm import tqdm
 
-    # Handle missing values if any
-    X = X.fillna(0)
-    X_for_predictions = X_for_predictions.fillna(0)
+for col in tqdm(numerical_features, desc="progress"):
+    plt.hist(X[col], bins=25, log=True)
+    plt.xlabel(col)
+    plt.savefig(f'./plots/hist_{col}.png', bbox_inches='tight')
+    plt.show()
+    
+#%% UNIQUE LENDING/BORROW PROTOCOL COUNT
 
-    # Standardize numerical features
-    scaler = StandardScaler()
-    X[numerical_features] = scaler.fit_transform(X[numerical_features])
-    X_for_predictions[numerical_features] = scaler.transform(X_for_predictions[numerical_features])
+unique_wallet_addresses = X['wallet_address'].unique()
 
-    # One-hot encode categorical features
-    if categorical_features:
-        encoder = OneHotEncoder(handle_unknown='ignore', sparse=False)
-        X_cat = encoder.fit_transform(X[categorical_features])
-        X_for_predictions_cat = encoder.transform(X_for_predictions[categorical_features])
+max_count = 15
+wallets_seen = []
 
-        # Get new feature names after encoding
-        encoded_features = encoder.get_feature_names_out(categorical_features)
+for protocol_type in ['lending', 'borrow']:
+    count = 0
+    for _, row in X.iterrows():
+        current_wallet = row['wallet_address']
+        if current_wallet not in wallets_seen and count < max_count:
+            if pd.notna(current_wallet):  # Ensure wallet address is valid
+                mask = X['wallet_address'] == current_wallet
+                plt.hist(X[mask][f'unique_{protocol_type}_protocol_count'], bins=25)
+                plt.title(f'{current_wallet} {count}')
+                plt.xlabel(f'{protocol_type}')
+                plt.show()  # Display the plot
+                wallets_seen.append(current_wallet)  # Add wallet to seen list
+                count += 1
+                
+#%%
 
-        # Create DataFrames from the encoded features
-        X_cat_df = pd.DataFrame(X_cat, columns=encoded_features, index=X.index)
-        X_for_predictions_cat_df = pd.DataFrame(X_for_predictions_cat, columns=encoded_features, index=X_for_predictions.index)
+import seaborn as sns
 
-        # Drop original categorical columns and concatenate encoded columns
-        X = X.drop(columns=categorical_features).reset_index(drop=True)
-        X = pd.concat([X, X_cat_df.reset_index(drop=True)], axis=1)
 
-        X_for_predictions = X_for_predictions.drop(columns=categorical_features).reset_index(drop=True)
-        X_for_predictions = pd.concat([X_for_predictions, X_for_predictions_cat_df.reset_index(drop=True)], axis=1)
 
-    return X, X_for_predictions
+sns.heatmap(X[numerical_features].corr())
+plt.show()
 
-#%% CUSTOM DATASET
-class CustomDataset(Dataset):
-    def __init__(self, X, y=None):
-        self.X = torch.tensor(X.values, dtype=torch.float32)
-        self.y = torch.tensor(y.values, dtype=torch.float32) if y is not None else None
+#%% MODEL PREPARATION
 
-    def __len__(self):
-        return len(self.X)
+from sklearn.model_selection import train_test_split
+from xgboost import XGBClassifier
+from sklearn.dummy import DummyClassifier
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler, OneHotEncoder
+from sklearn.compose import ColumnTransformer
+from sklearn.model_selection import cross_val_score
+import optuna
+from optuna.samplers import TPESampler
+from optuna.pruners import MedianPruner
 
-    def __getitem__(self, idx):
-        if self.y is not None:
-            return self.X[idx], self.y[idx]
-        return self.X[idx]
 
-#%% MODEL DEFINITIONS
-class BinaryClassificationModel(nn.Module):
-    def __init__(self, input_dim):
-        super(BinaryClassificationModel, self).__init__()
-        self.network = nn.Sequential(
-            nn.Linear(input_dim, 128),
-            nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(128, 64),
-            nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(64, 1),
-            nn.Sigmoid()
-        )
-
-    def forward(self, x):
-        return self.network(x)
-
-#%% TRAINING FUNCTION
-def train_model(model, dataloader, criterion, optimizer):
-    model.train()
-    running_loss = 0.0
-    for X_batch, y_batch in dataloader:
-        X_batch = X_batch.to(DEVICE)
-        y_batch = y_batch.to(DEVICE).unsqueeze(1)
-
-        optimizer.zero_grad()
-        outputs = model(X_batch)
-        loss = criterion(outputs, y_batch)
-        loss.backward()
-        optimizer.step()
-
-        running_loss += loss.item() * X_batch.size(0)
-    epoch_loss = running_loss / len(dataloader.dataset)
-    return epoch_loss
-
-#%% EVALUATION FUNCTION
-def evaluate_model(model, dataloader, criterion):
-    model.eval()
-    running_loss = 0.0
-    all_preds = []
-    all_labels = []
-    with torch.no_grad():
-        for X_batch, y_batch in dataloader:
-            X_batch = X_batch.to(DEVICE)
-            y_batch = y_batch.to(DEVICE).unsqueeze(1)
-
-            outputs = model(X_batch)
-            loss = criterion(outputs, y_batch)
-            running_loss += loss.item() * X_batch.size(0)
-
-            preds = outputs.cpu().numpy()
-            labels = y_batch.cpu().numpy()
-            all_preds.extend(preds)
-            all_labels.extend(labels)
-    epoch_loss = running_loss / len(dataloader.dataset)
-    all_preds = np.array(all_preds).flatten()
-    all_labels = np.array(all_labels).flatten()
-    roc_auc = roc_auc_score(all_labels, all_preds)
-    logloss = log_loss(all_labels, all_preds)
-    return epoch_loss, roc_auc, logloss, all_labels, all_preds
-
-#%% PLOTTING FUNCTIONS
-def plot_roc_curve(y_true, y_scores, model_name):
-    fpr, tpr, _ = roc_curve(y_true, y_scores)
-    plt.figure()
-    plt.plot(fpr, tpr, label=f'{model_name} (AUC = {roc_auc_score(y_true, y_scores):.4f})')
-    plt.plot([0,1], [0,1], 'k--')
-    plt.xlabel('False Positive Rate')
-    plt.ylabel('True Positive Rate')
-    plt.title(f'ROC Curve - {model_name}')
-    plt.legend(loc='lower right')
-    plt.savefig(f'roc_curve_{model_name}.png')
-    plt.close()
-
-def plot_loss(train_losses, val_losses, model_name):
-    plt.figure()
-    plt.plot(train_losses, label='Train Loss')
-    plt.plot(val_losses, label='Validation Loss')
-    plt.xlabel('Epoch')
-    plt.ylabel('Loss')
-    plt.title(f'Loss Curve - {model_name}')
-    plt.legend()
-    plt.savefig(f'loss_curve_{model_name}.png')
-    plt.close()
-
-#%% GENERATE FILES FUNCTION
-def generateFiles(predict_data, model):
-    """Generates prediction files for submission.
-
-    Args:
-        predict_data (pd.DataFrame): DataFrame containing input features.
-        model (nn.Module): Trained PyTorch model.
-
-    Outputs:
-        predictions.zip containing predictions.txt
-    """
-    model.eval()
-    dataset = CustomDataset(predict_data)
-    dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=False)
-    predictions = []
-    with torch.no_grad():
-        for X_batch in dataloader:
-            X_batch = X_batch.to(DEVICE)
-            outputs = model(X_batch)
-            preds = outputs.cpu().numpy().flatten()
-            predictions.extend(preds)
-    # Save predictions to txt
-    with open('./predictions.txt', 'w') as f:
-        for pred in predictions:
-            f.write(f"{pred}\n")
-    # Zip the txt file
-    with ZipFile('predictions.zip', 'w') as zipObj:
-        zipObj.write('predictions.txt')
-    os.remove('predictions.txt')
-
-#%% MAIN FUNCTION
-def main():
-    set_seed()
-
-    #%% DATA LOADING
-    X, y, X_for_predictions = load_data()
-    print("Initial Data Information:")
-    print(X.info())
-    print("Target Distribution:")
-    print(y['target'].value_counts())
-
-    #%% DATA PREPROCESSING
-    X, X_for_predictions = preprocess_data(X, X_for_predictions)
-    print("Preprocessed Data Information:")
-    print(X.info())
-
-    #%% SPLIT DATA
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y['target'], test_size=0.3, random_state=RANDOM_STATE, stratify=y['target']
-    )
-
-    #%% CREATE DATALOADERS
-    train_dataset = CustomDataset(X_train, y_train)
-    test_dataset = CustomDataset(X_test, y_test)
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
-    test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
-
-    #%% MODEL INITIALIZATION
-    input_dim = X_train.shape[1]
-    model = BinaryClassificationModel(input_dim).to(DEVICE)
-    criterion = nn.BCELoss()
-    optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
-
-    #%% TRAINING LOOP
-    train_losses = []
-    val_losses = []
-    for epoch in range(EPOCHS):
-        train_loss = train_model(model, train_loader, criterion, optimizer)
-        val_loss, roc_auc, logloss, _, _ = evaluate_model(model, test_loader, criterion)
-        train_losses.append(train_loss)
-        val_losses.append(val_loss)
-        print(f"Epoch {epoch+1}/{EPOCHS} - Train Loss: {train_loss:.4f} - Val Loss: {val_loss:.4f} - ROC AUC: {roc_auc:.4f} - Log Loss: {logloss:.4f}")
-
-    #%% FINAL EVALUATION
-    val_loss, roc_auc, logloss, y_true, y_scores = evaluate_model(model, test_loader, criterion)
-    print("\nFinal Evaluation on Test Set")
-    print(f"ROC AUC Score: {roc_auc:.4f}")
-    print(f"Log Loss: {logloss:.4f}")
-    y_pred_class = (y_scores >= 0.5).astype(int)
-    print("\nClassification Report:")
-    print(classification_report(y_true, y_pred_class))
-
-    #%% PLOTTING
-    plot_roc_curve(y_true, y_scores, "PyTorch_Model")
-    plot_loss(train_losses, val_losses, "PyTorch_Model")
-    print("\nPlots have been saved as PNG files.")
-
-    #%% GENERATE AND SAVE PREDICTIONS
-    print("\nGenerating Predictions on New Data...")
-    generateFiles(X_for_predictions, model)
-    if os.path.exists('predictions.zip'):
-        print("Predictions have been successfully saved to 'predictions.zip'.")
-    else:
-        print("Error: 'predictions.zip' was not created.")
+def run_classification(X,y,model_name):
+    X_train, y_train, X_test, y_test = train_test_split(X, y, 
+                                                        random_state=42,
+                                                        test_size=.3,
+                                                        stratify=y)    
+    preprocessor = ColumnTransformer(
+        transformers=[
+            ('num', StandardScaler(), numerical_features),
+            ('cat', OneHotEncoder(), categorical_features)
+        ],
+        remainder='passthrough')
+    
+    def objective(trial):
+        if model_name == 'xgboost':
+            gb_params = {
+                'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3),
+                'n_estimators': trial.suggest_int('n_estimators', 100, 1000),
+                'max_depth': trial.suggest_int('max_depth', 3, 10),
+                'min_child_weight': trial.suggest_int('min_child_weight', 1, 10),
+                'subsample': trial.suggest_float('subsample', 0.5, 1.0),
+                'colsample_bytree': trial.suggest_float('colsample_bytree', 0.5, 1.0)
+            }
+            pipeline = Pipeline(steps=[
+                    ('preprocessor', preprocessor),
+                    ('classifier', XGBClassifier(**gb_params, random_state=42))
+                ])
+            
+        else:
+            raise ValueError
+            
+        scores = cross_val_score(pipeline, X, y, scoring='roc_auc')
+        return min([np.mean(scores), np.median(scores)])
+    
+    study = optuna.create_study(direction='maximize',
+                                sampler=TPESampler(),
+                                pruner=MedianPruner())
+    study.optimize(
+        objective,
+        timeout=60*5,
+        show_progress_bar=True)
+    
+    return study
 
 if __name__ == "__main__":
-    main()
+    run_classification(X, y, model_name='xgboost')
+    
