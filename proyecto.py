@@ -253,14 +253,92 @@ import optuna
 from optuna.samplers import TPESampler
 from optuna.pruners import MedianPruner
 from sklearn.metrics import roc_auc_score
+from sklearn.metrics import precision_recall_curve, auc
 
 
+from sklearn.metrics import precision_recall_curve, auc
 
-def run_classification(X,y,model_name):
+# def run_classification(X,y,model_name):
+#     X_train, X_test, y_train, y_test = train_test_split(X, y, 
+#                                                         random_state=1936,
+#                                                         test_size=.3,
+#                                                         stratify=y)    
+#     preprocessor = ColumnTransformer(
+#         transformers=[
+#             ('minmax', MinMaxScaler(), minmax_scaler_features),
+#             ('power', PowerTransformer(method='yeo-johnson'), power_transformer_features),
+#             ('robust', RobustScaler(), robust_scaler_features),
+#             ('standard', StandardScaler(), standard_scaler_features),
+#             ('cat', OneHotEncoder(handle_unknown='ignore'), categorical_features)],
+#         remainder='passthrough')
+    
+#     def objective(trial):
+#         if model_name == 'xgboost':
+#             gb_params = {
+#                 'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3),
+#                 'n_estimators': trial.suggest_int('n_estimators', 100, 1000),
+#                 'max_depth': trial.suggest_int('max_depth', 3, 8),  # Reduce max depth
+#                 'min_child_weight': trial.suggest_int('min_child_weight', 1, 15),  # Increase range
+#                 'subsample': trial.suggest_float('subsample', 0.7, 1.0),  # Focus on larger subsamples
+#                 'colsample_bytree': trial.suggest_float('colsample_bytree', 0.7, 1.0),  # Avoid very small values
+#                 'reg_alpha': trial.suggest_float('reg_alpha', 0.0, 10.0),  # L1 regularization
+#                 'reg_lambda': trial.suggest_float('reg_lambda', 0.0, 10.0)  # L2 regularization
+#             }
+
+#             pipeline = Pipeline(steps=[
+#                     ('preprocessor', preprocessor),
+#                     ('classifier', XGBClassifier(**gb_params, random_state=1936))
+#                 ])
+            
+#         else:
+#             raise ValueError
+        
+#         pipeline.fit(X_train, y_train)
+#         y_train_pred_proba = pipeline.predict_proba(X_train)[:, 1]
+#         precision, recall, _ = precision_recall_curve(y_train, y_train_pred_proba)
+#         auc_pr = auc(recall, precision)
+#         return auc_pr
+    
+#     study = optuna.create_study(direction='maximize',
+#                                 sampler=TPESampler(),
+#                                 pruner=MedianPruner())
+#     study.optimize(
+#         objective,
+#         timeout=60*60,
+#         # n_trials=15,
+#         show_progress_bar=True)
+
+#     print(f"Best Parameters: {study.best_params}")
+#     print(f"Best AUC-PR Score: {study.best_value}")
+    
+#     pipeline = Pipeline(steps=[
+#         ('preprocessor', preprocessor),
+#         ('classifier', XGBClassifier(**study.best_params, random_state=42))
+#     ])
+    
+#     pipeline.fit(X_train, y_train)
+#     test_pred_proba = pipeline.predict_proba(X_test)[:, 1]
+#     precision, recall, _ = precision_recall_curve(y_test, test_pred_proba)
+#     test_auc_pr = auc(recall, precision)
+#     print(f"Test AUC-PR Score: {test_auc_pr}")
+
+#     return study
+
+# if __name__ == "__main__":
+#     best_study = run_classification(X, y, model_name='xgboost')
+
+
+#%%
+
+from sklearn.model_selection import StratifiedKFold
+from sklearn.metrics import precision_recall_curve, auc
+
+def run_classification(X, y, model_name):
     X_train, X_test, y_train, y_test = train_test_split(X, y, 
                                                         random_state=1936,
                                                         test_size=.3,
-                                                        stratify=y)    
+                                                        stratify=y)
+    
     preprocessor = ColumnTransformer(
         transformers=[
             ('minmax', MinMaxScaler(), minmax_scaler_features),
@@ -271,59 +349,62 @@ def run_classification(X,y,model_name):
         remainder='passthrough')
     
     def objective(trial):
-        if model_name == 'xgboost':
-            gb_params = {
-                'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3),
-                'n_estimators': trial.suggest_int('n_estimators', 100, 1000),
-                'max_depth': trial.suggest_int('max_depth', 3, 10),
-                'min_child_weight': trial.suggest_int('min_child_weight', 1, 10),
-                'subsample': trial.suggest_float('subsample', 0.5, 1.0),
-                'colsample_bytree': trial.suggest_float('colsample_bytree', 0.5, 1.0)
-            }
-            pipeline = Pipeline(steps=[
-                    ('preprocessor', preprocessor),
-                    ('classifier', XGBClassifier(**gb_params, random_state=1936))
-                ])
+        gb_params = {
+            'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3),
+            'n_estimators': trial.suggest_int('n_estimators', 100, 1000),
+            'max_depth': trial.suggest_int('max_depth', 3, 8),
+            'min_child_weight': trial.suggest_int('min_child_weight', 1, 15),
+            'subsample': trial.suggest_float('subsample', 0.7, 1.0),
+            'colsample_bytree': trial.suggest_float('colsample_bytree', 0.7, 1.0),
+            'reg_alpha': trial.suggest_float('reg_alpha', 0.0, 10.0),
+            'reg_lambda': trial.suggest_float('reg_lambda', 0.0, 10.0)
+        }
+        pipeline = Pipeline(steps=[
+            ('preprocessor', preprocessor),
+            ('classifier', XGBClassifier(**gb_params, random_state=1936, device='cuda'))
+        ])
+        
+        skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+        aucs = []
+        for fold_idx, (train_index, val_index) in enumerate(skf.split(X_train, y_train)):
+            X_train_fold, X_val_fold = X_train.iloc[train_index], X_train.iloc[val_index]
+            y_train_fold, y_val_fold = y_train.iloc[train_index], y_train.iloc[val_index]
+            pipeline.fit(X_train_fold, y_train_fold)
+            y_val_pred = pipeline.predict_proba(X_val_fold)[:, 1]
+            precision, recall, _ = precision_recall_curve(y_val_fold, y_val_pred)
+            auc_pr = auc(recall, precision)
+            aucs.append(auc_pr)
             
-        else:
-            raise ValueError
+            # Report intermediate score for pruning
+            trial.report(np.mean(aucs), step=fold_idx)
             
-        scores = cross_val_score(pipeline, X_train, y_train, scoring='roc_auc')
-        return min([np.mean(scores), np.median(scores)])
-    
-    study = optuna.create_study(direction='maximize',
-                                sampler=TPESampler(),
-                                pruner=MedianPruner())
-    study.optimize(
-        objective,
-        #timeout=60*20,
-        n_trials=15,
-        show_progress_bar=True)
+            # Check if the trial should be pruned
+            if trial.should_prune():
+                raise optuna.exceptions.TrialPruned()
+            
+        return np.mean(aucs)
 
-    print(f"Best Parameters: {study.best_params}")
-    print(f"Best ROC-AUC Score: {study.best_value}")
+    
+    study = optuna.create_study(direction='maximize', sampler=TPESampler(), pruner=MedianPruner())
+    study.optimize(objective, timeout=60*60, show_progress_bar=True)
     
     print(f"Best Parameters: {study.best_params}")
-    print(f"Best ROC-AUC Score: {study.best_value}")
-
+    print(f"Best AUC-PR Score (CV): {study.best_value}")
+    
     pipeline = Pipeline(steps=[
         ('preprocessor', preprocessor),
-        ('classifier', XGBClassifier(**study.best_params, random_state=42))
+        ('classifier', XGBClassifier(**study.best_params, random_state=1936, device='cuda'))
     ])
     
     pipeline.fit(X_train, y_train)
-    test_pred_proba = pipeline.predict_proba(X_test)[:, 1]
-    test_auc = roc_auc_score(y_test, test_pred_proba)
-    print(f"Test ROC-AUC Score: {test_auc}")
-
+    y_test_pred_proba = pipeline.predict_proba(X_test)[:, 1]
+    precision, recall, _ = precision_recall_curve(y_test, y_test_pred_proba)
+    test_auc_pr = auc(recall, precision)
+    print(f"Test AUC-PR Score: {test_auc_pr}")
     return study
 
 if __name__ == "__main__":
-    run_classification(X, y, model_name='xgboost')
-    
-
-
-
+    best_study = run_classification(X, y, model_name='xgboost')
 
 
 # %%
@@ -353,4 +434,25 @@ def generateFiles(predict_data, clf_pipe):
         zipObj.write('predictions.txt')
     os.remove('predictions.txt')
 
-generateFiles(X_test, pipe_clf)
+if __name__ == "__main__":
+    
+    X_train, X_test, y_train, y_test = train_test_split(X, y, 
+                                                        random_state=1936,
+                                                        test_size=.3,
+                                                        stratify=y)     
+    preprocessor = ColumnTransformer(
+        transformers=[
+            ('minmax', MinMaxScaler(), minmax_scaler_features),
+            ('power', PowerTransformer(method='yeo-johnson'), power_transformer_features),
+            ('robust', RobustScaler(), robust_scaler_features),
+            ('standard', StandardScaler(), standard_scaler_features),
+            ('cat', OneHotEncoder(handle_unknown='ignore'), categorical_features)],
+        remainder='passthrough')
+
+    pipe_clf = Pipeline(steps=[
+            ('preprocessor', preprocessor),
+            ('classifier', XGBClassifier(**best_study.best_params, random_state=1936, device='cuda'))
+        ])
+    
+    pipe_clf.fit(X_train,y_train)    
+    generateFiles(X_for_predictions, pipe_clf)
