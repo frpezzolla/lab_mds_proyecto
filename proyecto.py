@@ -1,3 +1,4 @@
+#%%
 import pandas as pd
 
 X0 = pd.read_parquet("./data/X_t0.parquet")
@@ -98,6 +99,42 @@ categorical_features = [col for col, dtype in data_types.items() if dtype == 'ca
 datetime_features = [col for col, dtype in data_types.items() if dtype == 'datetime']
 other_features = [col for col, dtype in data_types.items() if dtype not in ['numerical', 'categorical', 'datetime']]
 
+minmax_scaler_features = [
+    'market_rocr', 'market_correl', 
+    'unique_borrow_protocol_count', 'unique_lending_protocol_count'
+]
+
+power_transformer_features = [
+    'avg_gas_paid_per_tx_eth', 'avg_weighted_risk_factor', 'borrow_block_number',
+    'incoming_tx_sum_eth', 'max_risk_factor', 'repay_count',
+    'risk_factor_above_threshold_daily_count', 'risky_tx_count',
+    'risky_unique_contract_count', 'total_available_borrows_eth',
+    'total_available_borrows_avg_eth', 'total_balance_eth',
+    'total_collateral_avg_eth', 'total_collateral_eth', 'total_gas_paid_eth',
+    'wallet_age', 'withdraw_amount_sum_eth', 'withdraw_deposit_diff_if_positive_eth'
+]
+
+robust_scaler_features = [
+    'avg_risk_factor', 'borrow_amount_avg_eth', 'borrow_amount_sum_eth',
+    'borrow_count', 'borrow_repay_diff_eth', 'deposit_amount_sum_eth',
+    'deposit_count', 'incoming_tx_count', 'liquidation_amount_sum_eth',
+    'liquidation_count', 'market_max_drawdown_365d', 'market_plus_dm',
+    'net_incoming_tx_count', 'outgoing_tx_avg_eth', 'outgoing_tx_count',
+    'outgoing_tx_sum_eth', 'repay_amount_avg_eth', 'repay_amount_sum_eth',
+    'risky_first_last_tx_timestamp_diff', 'risky_sum_outgoing_amount_eth',
+    'time_since_first_deposit', 'time_since_last_liquidated'
+]
+
+standard_scaler_features = [
+    'market_adxr', 'market_apo', 'market_aroonosc', 'market_aroonup',
+    'market_atr', 'market_cci', 'market_cmo', 'market_dx', 'market_fastd',
+    'market_fastk', 'market_linearreg_slope', 'market_macd',
+    'market_macd_macdext', 'market_macd_macdfix', 'market_macdsignal',
+    'market_macdsignal_macdext', 'market_macdsignal_macdfix', 'market_natr',
+    'market_plus_di', 'market_ppo', 'market_rocp', 'risk_factor'
+]
+
+
 # print(f"Numerical Features ({len(numerical_features)}): {numerical_features}")
 # print(f"Categorical Features ({len(categorical_features)}): {categorical_features}")
 # print(f"Datetime Features ({len(datetime_features)}): {datetime_features}")
@@ -116,12 +153,28 @@ X['max_risk_factor'] = X.max_risk_factor.replace(1000000, np.nan)
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 
-for col in tqdm(numerical_features, desc="progress"):
+for col in tqdm(minmax_scaler_features, desc="progress"):
     plt.hist(X[col], bins=25, log=True)
     plt.xlabel(col)
     plt.savefig(f'./plots/hist_{col}.png', bbox_inches='tight')
     plt.show()
+
     
+
+#%%
+import matplotlib.pyplot as plt
+from tqdm import tqdm
+
+for feature_set in [
+    minmax_scaler_features, power_transformer_features,
+    robust_scaler_features, standard_scaler_features
+]:
+    for col in feature_set:
+        plt.hist(X[col], bins=25, log=True)
+        plt.xlabel(col)
+        plt.savefig(f'./plots/hist_{col}.png', bbox_inches='tight')
+        plt.show()
+
 #%% UNIQUE LENDING/BORROW PROTOCOL COUNT
 
 unique_wallet_addresses = X['wallet_address'].unique()
@@ -147,10 +200,45 @@ for protocol_type in ['lending', 'borrow']:
 
 import seaborn as sns
 
-
-
 sns.heatmap(X[numerical_features].corr())
 plt.show()
+
+
+#%%
+
+stats_numerical = X[numerical_features].describe()
+stats_numerical
+
+#%%
+
+stats_categorical = X[categorical_features].describe(include='all')
+stats_categorical
+
+#%%
+
+from scipy.stats import shapiro, skew, kurtosis
+
+shapiro_results = {}
+skew_results = {}
+kurtosis_results = {}
+
+for col in numerical_features:
+    data = X[col].dropna()
+    shapiro_results[col] = shapiro(data)
+    skew_results[col] = skew(data)
+    kurtosis_results[col] = kurtosis(data)
+
+print("Shapiro-Wilk Test Results:")
+for col, result in shapiro_results.items():
+    print(f"{col}: W={result[0]}, p-value={result[1]}")
+
+print("\nSkewness Results:")
+for col, result in skew_results.items():
+    print(f"{col}: skewness={result}")
+
+print("\nKurtosis Results:")
+for col, result in kurtosis_results.items():
+    print(f"{col}: kurtosis={result}")
 
 #%% MODEL PREPARATION
 
@@ -158,24 +246,28 @@ from sklearn.model_selection import train_test_split
 from xgboost import XGBClassifier
 from sklearn.dummy import DummyClassifier
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import StandardScaler, OneHotEncoder
+from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler, PowerTransformer, OneHotEncoder
 from sklearn.compose import ColumnTransformer
 from sklearn.model_selection import cross_val_score
 import optuna
 from optuna.samplers import TPESampler
 from optuna.pruners import MedianPruner
+from sklearn.metrics import roc_auc_score
+
 
 
 def run_classification(X,y,model_name):
-    X_train, y_train, X_test, y_test = train_test_split(X, y, 
-                                                        random_state=42,
+    X_train, X_test, y_train, y_test = train_test_split(X, y, 
+                                                        random_state=1936,
                                                         test_size=.3,
                                                         stratify=y)    
     preprocessor = ColumnTransformer(
         transformers=[
-            ('num', StandardScaler(), numerical_features),
-            ('cat', OneHotEncoder(), categorical_features)
-        ],
+            ('minmax', MinMaxScaler(), minmax_scaler_features),
+            ('power', PowerTransformer(method='yeo-johnson'), power_transformer_features),
+            ('robust', RobustScaler(), robust_scaler_features),
+            ('standard', StandardScaler(), standard_scaler_features),
+            ('cat', OneHotEncoder(handle_unknown='ignore'), categorical_features)],
         remainder='passthrough')
     
     def objective(trial):
@@ -190,13 +282,13 @@ def run_classification(X,y,model_name):
             }
             pipeline = Pipeline(steps=[
                     ('preprocessor', preprocessor),
-                    ('classifier', XGBClassifier(**gb_params, random_state=42))
+                    ('classifier', XGBClassifier(**gb_params, random_state=1936))
                 ])
             
         else:
             raise ValueError
             
-        scores = cross_val_score(pipeline, X, y, scoring='roc_auc')
+        scores = cross_val_score(pipeline, X_train, y_train, scoring='roc_auc')
         return min([np.mean(scores), np.median(scores)])
     
     study = optuna.create_study(direction='maximize',
@@ -204,11 +296,61 @@ def run_classification(X,y,model_name):
                                 pruner=MedianPruner())
     study.optimize(
         objective,
-        timeout=60*5,
+        #timeout=60*20,
+        n_trials=15,
         show_progress_bar=True)
+
+    print(f"Best Parameters: {study.best_params}")
+    print(f"Best ROC-AUC Score: {study.best_value}")
     
+    print(f"Best Parameters: {study.best_params}")
+    print(f"Best ROC-AUC Score: {study.best_value}")
+
+    pipeline = Pipeline(steps=[
+        ('preprocessor', preprocessor),
+        ('classifier', XGBClassifier(**study.best_params, random_state=42))
+    ])
+    
+    pipeline.fit(X_train, y_train)
+    test_pred_proba = pipeline.predict_proba(X_test)[:, 1]
+    test_auc = roc_auc_score(y_test, test_pred_proba)
+    print(f"Test ROC-AUC Score: {test_auc}")
+
     return study
 
 if __name__ == "__main__":
     run_classification(X, y, model_name='xgboost')
     
+
+
+
+
+
+# %%
+
+from zipfile import ZipFile
+import os
+
+
+def generateFiles(predict_data, clf_pipe):
+    """Genera los archivos a subir en CodaLab
+
+    Input
+    ---------------
+    predict_data: Dataframe con los datos de entrada a predecir
+    clf_pipe: pipeline del clf
+
+    Ouput
+    ---------------
+    archivo de txt
+    """
+    y_pred_clf = clf_pipe.predict_proba(predict_data)[:, 1]
+    with open('./predictions.txt', 'w') as f:
+        for item in y_pred_clf:
+            f.write("%s\n" % item)
+    
+    with ZipFile('predictions.zip', 'w') as zipObj:
+        zipObj.write('predictions.txt')
+    os.remove('predictions.txt')
+
+generateFiles(X_test, pipe_clf)
